@@ -372,9 +372,7 @@
           canvas.width = size
           canvas.height = size
           const ctx = canvas.getContext('2d')
-          // Fill transparent background first (ensures alpha channel)
           ctx.clearRect(0, 0, size, size)
-          // Scale and centre the image to fill the square
           const scale = Math.max(size / image.width, size / image.height)
           const sw = image.width * scale
           const sh = image.height * scale
@@ -418,6 +416,11 @@
     return sec
   }
 
+  // Strip HTML tags and collapse whitespace to plain text
+  function toPlainText(html) {
+    return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  }
+
   // ── API CALLS ────────────────────────────────────────────
   async function callClaude(prompt, images = []) {
     const content = []
@@ -442,15 +445,15 @@
     return data.content[0].text
   }
 
-  async function generateRender(prompt, photo) {
+  async function generateRender(prompt, imageBase64) {
     const res = await fetch(PROXY, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         service: 'openai-image',
         prompt,
-        imageBase64: photo.base64,
-        imageType: photo.type,
+        imageBase64,
+        imageType: 'image/png',
       })
     })
     const data = await res.json()
@@ -458,6 +461,32 @@
     const img = data.data?.[0]
     if (!img) throw new Error('No image returned')
     return img.url || `data:image/png;base64,${img.b64_json}`
+  }
+
+  // Fetch a render result URL and return it as a base64 PNG string.
+  // If the result was already a data URI we extract the base64 directly;
+  // otherwise we fetch the remote URL and convert via a canvas.
+  async function urlToBase64(src) {
+    if (src.startsWith('data:image/png;base64,')) {
+      return src.split(',')[1]
+    }
+
+    // Fetch the remote image and draw onto a canvas to get a PNG base64
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image()
+      el.crossOrigin = 'anonymous'
+      el.onload = () => resolve(el)
+      el.onerror = () => reject(new Error('Could not load render image for chaining'))
+      el.src = src
+    })
+
+    const canvas = document.createElement('canvas')
+    canvas.width = img.naturalWidth || 1024
+    canvas.height = img.naturalHeight || 1024
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(img, 0, 0)
+    const dataUrl = canvas.toDataURL('image/png')
+    return dataUrl.split(',')[1]
   }
 
   // ── PARSE CLAUDE RESPONSE ─────────────────────────────────
@@ -482,9 +511,97 @@
     }, [])
   }
 
+  // ── IMAGE PROMPT BUILDER ──────────────────────────────────
+  //
+  // Extracts the most visually relevant content from the Claude sections
+  // and composes a detailed, structured prompt for the OpenAI image edit.
+  //
+  function buildImagePrompt(sections, style, features, lighting) {
+    const get = (title) => {
+      const s = sections.find(s => s.title.toLowerCase() === title.toLowerCase())
+      return s ? toPlainText(s.html) : ''
+    }
+
+    // Condense planting highlights to a compact comma list (strip filler words)
+    const plantingRaw = get('Planting highlights')
+    // Each line is typically "Plant name - reason". We keep just the plant names.
+    const plants = plantingRaw
+      .split(/[,.]/)
+      .map(p => p.replace(/\s*[-–]\s*.+/, '').trim())
+      .filter(p => p.length > 2 && p.length < 60)
+      .slice(0, 6)
+      .join(', ')
+
+    const concept     = get('Concept')
+    const siteAnalysis = get('Site analysis')
+    const maintenance  = get('Maintenance notes')
+
+    // Extract hard landscaping clues from concept + site analysis
+    const hardLandscaping = [concept, siteAnalysis]
+      .join(' ')
+      .match(/\b(patio|path|gravel|decking|paving|pergola|raised bed|wall|fence|steps|terrace|sleepers|edging)\b/gi)
+    const hardFeatures = hardLandscaping
+      ? [...new Set(hardLandscaping.map(w => w.toLowerCase()))].join(', ')
+      : ''
+
+    const featuresLine = features ? `Features: ${features}.` : ''
+    const hardLine     = hardFeatures ? `Hard landscaping: ${hardFeatures}.` : ''
+    const plantsLine   = plants ? `Key plants: ${plants}.` : ''
+    const maintLine    = maintenance ? `Maintenance level: ${maintenance.split('.')[0]}.` : ''
+
+    return [
+      `Photorealistic garden design render of a redesigned ${style || 'contemporary'} UK garden.`,
+      concept,
+      hardLine,
+      plantsLine,
+      featuresLine,
+      maintLine,
+      lighting.description,
+      `Preserve the house walls, roofline, fences and all boundary structures exactly as in the original photo.`,
+      `No people. No text. No watermarks.`,
+    ].filter(Boolean).join(' ')
+  }
+
+  // Re-light prompt for renders 2 and 3.
+  // The design is locked to render 1 — only lighting and atmosphere change.
+  // Locking instructions come first and are maximally specific; the lighting
+  // change is a single clause at the end so the model treats it as a narrow
+  // modification rather than a new creative brief.
+  function buildRelightPrompt(style, features, lighting) {
+    return [
+      `IMPORTANT: Do not change the garden design. This is a relighting only.`,
+      `Copy the input image exactly: every plant species, plant position, plant size, and planting arrangement must be pixel-for-pixel identical to the input image.`,
+      `The path shape, path material, and path position must be exactly as in the input image.`,
+      `The pergola, if present, must stay in exactly the same position and with the same structure as in the input image.`,
+      `All furniture, pots, and decorative objects must remain in exactly the same positions as in the input image.`,
+      `The lawn shape and all border shapes must be exactly as in the input image.`,
+      `The house walls, roofline, conservatory, windows, fences, and all boundary structures must be exactly as in the input image.`,
+      `The only permitted change is the lighting and sky: apply ${lighting.label.toLowerCase()} conditions — ${lighting.description}`,
+      `No people. No text. No watermarks.`,
+    ].join(' ')
+  }
+
+  // ── RENDER SLOT HELPERS ───────────────────────────────────
+  function showSlotImage(slot, imgUrl, label) {
+    const img = document.createElement('img')
+    img.src = imgUrl
+    slot.innerHTML = ''
+    slot.classList.remove('generating')
+    slot.appendChild(img)
+    const lbl = document.createElement('div')
+    lbl.className = 'label'
+    lbl.textContent = label
+    slot.appendChild(lbl)
+  }
+
+  function showSlotError(slot, message) {
+    slot.classList.remove('generating')
+    slot.innerHTML = `<div style="color:#c0392b;font-size:0.78rem;padding:8px">Failed: ${message}</div>`
+  }
+
   // ── MAIN FLOW ─────────────────────────────────────────────
   async function runAnalysis() {
-    const btn = document.getElementById('runBtn')
+    const btn  = document.getElementById('runBtn')
     const main = document.getElementById('mainPanel')
 
     if (uploadedPhotos.length === 0) {
@@ -503,7 +620,7 @@
     btn.disabled = true
 
     try {
-      // Step 1: Site analysis via Claude
+      // ── Step 1: Site analysis via Claude ──────────────────
       setStatus('Analysing your garden...', 'loading')
 
       const brief = `
@@ -542,22 +659,37 @@ MAINTENANCE NOTES
 [3-4 sentences on seasonal tasks for the chosen maintenance level]
       `.trim()
 
-      const analysis = await callClaude(brief, uploadedPhotos)
-      const sections = parseAnalysis(analysis)
+      const analysis  = await callClaude(brief, uploadedPhotos)
+      const sections  = parseAnalysis(analysis)
+      const styleVal  = document.getElementById('style').value || 'contemporary'
+      const features  = getFeatures()
 
-      setStatus('Analysis complete. Generating renders...', 'loading')
+      setStatus('Analysis complete. Generating render 1 of 3...', 'loading')
       sections.forEach(s => main.appendChild(buildSection(s.title, s.html)))
 
-      // Step 2: Garden renders via OpenAI
+      // ── Step 2: Render grid setup ─────────────────────────
       const renderSection = document.createElement('div')
       renderSection.className = 'result-section'
       renderSection.innerHTML = `<h3>Garden Renders</h3><div class="render-grid" id="renderGrid"></div>`
       main.appendChild(renderSection)
 
+      // Time-of-day descriptors with richer lighting, shadow and mood language
       const timeOfDay = [
-        { id: 'slot-morning',   label: 'Morning',   light: 'soft golden morning light, dew on plants, fresh atmosphere' },
-        { id: 'slot-afternoon', label: 'Afternoon', light: 'bright midday sun, vivid colours, clear blue sky' },
-        { id: 'slot-evening',   label: 'Evening',   light: 'warm low evening sun, long shadows, soft garden lighting glowing' },
+        {
+          id: 'slot-morning',
+          label: 'Morning',
+          description: 'Soft golden morning light raking across the garden from a low eastern sun. Long gentle shadows, dew on foliage and petals, fresh cool atmosphere, slight mist in background.',
+        },
+        {
+          id: 'slot-afternoon',
+          label: 'Afternoon',
+          description: 'Bright overhead midday sun, short crisp shadows directly beneath plants and structures, vivid saturated colours, clear blue sky, warm summer feel.',
+        },
+        {
+          id: 'slot-evening',
+          label: 'Evening',
+          description: 'Warm amber low evening sun from the west, long dramatic shadows stretching across the garden, golden-hour glow on foliage, soft garden path lighting and lanterns beginning to glow, atmospheric haze.',
+        },
       ]
 
       const grid = document.getElementById('renderGrid')
@@ -569,29 +701,46 @@ MAINTENANCE NOTES
         grid.appendChild(slot)
       })
 
-      const conceptText = sections.find(s => s.title === 'Concept')
-        ?.html.replace(/<[^>]+>/g, '') || ''
-      const styleVal = document.getElementById('style').value || 'contemporary'
-      const basePhoto = uploadedPhotos[0]
+      const basePhoto  = uploadedPhotos[0]
+      const [morning, afternoon, evening] = timeOfDay
 
-      // Fire all three renders in parallel
-      await Promise.all(timeOfDay.map(async ({ id, label, light }) => {
-        const slot = document.getElementById(id)
+      // ── Step 3: Render 1 (morning) with the original photo ──
+      // Uses the full transformation prompt — this establishes the design.
+      const morningPrompt = buildImagePrompt(sections, styleVal, features, morning)
+      console.log('Render 1 prompt:', morningPrompt)
+
+      let render1Url
+      try {
+        render1Url = await generateRender(morningPrompt, basePhoto.base64)
+        showSlotImage(document.getElementById(morning.id), render1Url, morning.label)
+      } catch (err) {
+        showSlotError(document.getElementById(morning.id), err.message)
+        // Fall through — renders 2 and 3 will fall back to the original photo
+      }
+
+      setStatus('Render 1 complete. Generating renders 2 and 3...', 'loading')
+
+      // Convert render 1 to base64 for chaining; fall back to original photo if it failed
+      let chainBase64 = basePhoto.base64
+      if (render1Url) {
         try {
-          const prompt = `Transform this garden into a beautifully designed ${styleVal} UK garden. ${conceptText} ${light}. Photorealistic garden design render. Preserve the house walls, roofline, fences and boundary structures exactly as in the original photo.`
-          const imgUrl = await generateRender(prompt, basePhoto)
-          const img = document.createElement('img')
-          img.src = imgUrl
-          slot.innerHTML = ''
-          slot.classList.remove('generating')
-          slot.appendChild(img)
-          const lbl = document.createElement('div')
-          lbl.className = 'label'
-          lbl.textContent = label
-          slot.appendChild(lbl)
+          chainBase64 = await urlToBase64(render1Url)
         } catch (err) {
-          slot.classList.remove('generating')
-          slot.innerHTML = `<div style="color:#c0392b;font-size:0.78rem;padding:8px">Failed: ${err.message}</div>`
+          console.warn('Could not convert render 1 for chaining, falling back to original photo:', err.message)
+        }
+      }
+
+      // ── Step 4: Renders 2 and 3 in parallel, chained off render 1 ──
+      // Uses a shorter re-lighting prompt since the design is already established.
+      await Promise.all([afternoon, evening].map(async (tod) => {
+        const slot   = document.getElementById(tod.id)
+        const prompt = buildRelightPrompt(styleVal, features, tod)
+        console.log(`Render (${tod.label}) prompt:`, prompt)
+        try {
+          const imgUrl = await generateRender(prompt, chainBase64)
+          showSlotImage(slot, imgUrl, tod.label)
+        } catch (err) {
+          showSlotError(slot, err.message)
         }
       }))
 
