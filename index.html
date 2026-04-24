@@ -240,6 +240,14 @@
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── GARDEN PLAN ── */
+    .plan-wrap { width: 100%; max-width: 700px; margin: 0 auto; }
+    .plan-wrap svg { width: 100%; height: auto; display: block; border-radius: 6px; }
+    .plan-note { font-size: 0.78rem; color: #aaa; text-align: center; margin-top: 8px; font-style: italic; }
+    .plan-legend { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-top: 14px; font-size: 0.82rem; color: #555; }
+    .plan-legend-item { display: flex; align-items: center; gap: 6px; }
+    .plan-legend-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.15); flex-shrink: 0; }
   </style>
 </head>
 <body>
@@ -275,9 +283,13 @@
           <select id="orientation">
             <option value="">Select...</option>
             <option>North-facing</option>
-            <option>South-facing</option>
+            <option>North-east-facing</option>
             <option>East-facing</option>
+            <option>South-east-facing</option>
+            <option>South-facing</option>
+            <option>South-west-facing</option>
             <option>West-facing</option>
+            <option>North-west-facing</option>
             <option>Not sure</option>
           </select>
         </div>
@@ -599,7 +611,347 @@
     slot.innerHTML = `<div style="color:#c0392b;font-size:0.78rem;padding:8px">Failed: ${message}</div>`
   }
 
-  // ── MAIN FLOW ─────────────────────────────────────────────
+  // ── GARDEN PLAN: JSON FETCH ───────────────────────────────
+  //
+  // Asks Claude to produce a structured JSON layout of the garden design.
+  // Coordinates are in a normalised 0-100 space (width=100, height=100).
+  // The JS renderer scales them to actual SVG pixels.
+
+  async function fetchGardenPlanJson(analysisText, brief) {
+    const prompt = `
+You are a garden designer producing a precise top-down plan layout in JSON format.
+
+Garden brief:
+- Dimensions: ${brief.dimensions || 'unknown (use a typical suburban UK garden, approximately 12m wide x 10m deep)'}
+- Orientation: ${brief.orientation}
+- Style: ${brief.style}
+- Features: ${brief.features}
+
+Garden design analysis:
+${analysisText}
+
+Produce a JSON object describing the garden layout. Use a coordinate space where:
+- x: 0 = left boundary, 100 = right boundary (width)
+- y: 0 = house end (top of plan), 100 = far boundary (bottom of plan)
+- The house wall runs along y=0. The garden is below it.
+
+The JSON must follow this exact schema:
+
+{
+  "gardenWidth": <number, metres>,
+  "gardenDepth": <number, metres>,
+  "northAngle": <number, degrees clockwise from up. 0=north is up, 90=north is right, 180=north is down, 270=north is left. Derive from orientation.>,
+  "zones": [
+    {
+      "type": "lawn" | "patio" | "path" | "bed" | "structure" | "water" | "kids" | "gravel",
+      "label": "<short display label>",
+      "shape": "rect" | "polygon" | "ellipse",
+      "points": [[x,y], ...],   // for polygon: 3+ points. for rect: [[x1,y1],[x2,y2]] (top-left, bottom-right). for ellipse: [[cx,cy],[rx,ry]]
+      "plants": [               // only for type "bed" — list of plant symbols to draw
+        { "symbol": "shrub" | "grass" | "perennial" | "tree" | "climber", "x": <0-100>, "y": <0-100>, "label": "<plant name>" }
+      ]
+    }
+  ],
+  "structures": [
+    {
+      "type": "pergola" | "shed" | "greenhouse" | "arch" | "wall" | "fence" | "gate" | "bbq" | "seating",
+      "label": "<short label>",
+      "x": <centre x>,
+      "y": <centre y>,
+      "w": <width in coordinate units>,
+      "h": <depth in coordinate units>,
+      "rotation": <degrees>
+    }
+  ]
+}
+
+Rules:
+- Place the patio adjacent to the house (y between 0 and 25).
+- Lawn typically occupies the middle area.
+- Planting beds run along boundaries (x near 0 or 100, or y near 100).
+- Path connects patio to far end or key features — use polygon with 4 points for a path strip.
+- Every zone must fit within 0-100 on both axes.
+- Include 3-8 zones and 0-4 structures depending on the design.
+- For beds, include 2-4 plant symbols each, positioned within the bed polygon bounds.
+- northAngle: south-facing garden = north is behind the viewer = 180. North-facing = 0. East-facing = 270. West-facing = 90.
+- Respond with ONLY the raw JSON object. No markdown, no explanation, no code fences.
+`.trim()
+
+    const text = await callClaude(prompt, [])
+    // Strip any accidental markdown fences
+    const clean = text.replace(/```json|```/gi, '').trim()
+    try {
+      return JSON.parse(clean)
+    } catch (e) {
+      // Attempt to extract JSON object if there's surrounding text
+      const match = clean.match(/\{[\s\S]*\}/)
+      if (match) return JSON.parse(match[0])
+      throw new Error('Could not parse garden plan JSON: ' + e.message)
+    }
+  }
+
+  // ── GARDEN PLAN: SVG RENDERER ─────────────────────────────
+  //
+  // Takes the JSON layout and renders a detailed architectural-style
+  // garden plan SVG with zone fills, hatching, plant symbols,
+  // dimension lines, zone labels, and a north arrow.
+
+  function renderGardenPlanSVG(plan, dimensionsInput) {
+    const W = 660   // SVG canvas width  (px)
+    const H = 560   // SVG canvas height (px)
+    const PAD = 54  // padding for dimension lines and labels
+
+    // Coordinate transform: 0-100 JSON space → SVG pixels
+    const tx = x => PAD + (x / 100) * (W - PAD * 2)
+    const ty = y => PAD + (y / 100) * (H - PAD * 2)
+    const tw = w => (w / 100) * (W - PAD * 2)
+    const th = h => (h / 100) * (H - PAD * 2)
+
+    // Zone colour palette — earthy, architectural
+    const ZONE_STYLE = {
+      lawn:      { fill: '#c8ddb0', stroke: '#8aad5a', label: '#3a6b1a' },
+      patio:     { fill: '#e8dcc8', stroke: '#b8a882', label: '#5c4a20' },
+      path:      { fill: '#d4c4a0', stroke: '#a89060', label: '#5c4020' },
+      bed:       { fill: '#b8d4a0', stroke: '#6a9940', label: '#2a5a10' },
+      gravel:    { fill: '#ddd4b8', stroke: '#a89870', label: '#5c4820' },
+      water:     { fill: '#b8d4e8', stroke: '#5090b8', label: '#105880' },
+      kids:      { fill: '#e8d8b0', stroke: '#c0a040', label: '#7a5800' },
+      structure: { fill: '#d8c8b8', stroke: '#907860', label: '#503020' },
+    }
+
+    // Plant symbol renderers — hand-drawn feel using SVG primitives
+    function plantSymbol(sym, cx, cy, r = 7) {
+      switch (sym) {
+        case 'tree':
+          return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#4a8a30" stroke="#2a5a18" stroke-width="1.2" opacity="0.85"/>
+                  <circle cx="${cx}" cy="${cy}" r="${r * 0.45}" fill="#3a7a22" opacity="0.6"/>`
+        case 'shrub':
+          return `<ellipse cx="${cx}" cy="${cy}" rx="${r * 0.9}" ry="${r * 0.7}" fill="#6aaa40" stroke="#3a7a20" stroke-width="1" opacity="0.8"/>
+                  <ellipse cx="${cx - r*0.3}" cy="${cy - r*0.2}" rx="${r * 0.55}" ry="${r * 0.45}" fill="#7aba50" opacity="0.6"/>`
+        case 'grass':
+          // Ornamental grass tuft: radiating lines
+          return Array.from({length: 7}, (_, i) => {
+            const a = (i / 7) * Math.PI * 2
+            const ex = cx + Math.cos(a) * r
+            const ey = cy + Math.sin(a) * r * 0.7
+            return `<line x1="${cx}" y1="${cy}" x2="${ex}" y2="${ey}" stroke="#8ab840" stroke-width="1.2" opacity="0.85"/>`
+          }).join('') + `<circle cx="${cx}" cy="${cy}" r="2" fill="#6a9830"/>`
+        case 'perennial':
+          // Small star/flower shape
+          return Array.from({length: 6}, (_, i) => {
+            const a = (i / 6) * Math.PI * 2
+            const ex = cx + Math.cos(a) * r
+            const ey = cy + Math.sin(a) * r
+            return `<line x1="${cx}" y1="${cy}" x2="${ex}" y2="${ey}" stroke="#c060a0" stroke-width="1.3" opacity="0.8"/>`
+          }).join('') + `<circle cx="${cx}" cy="${cy}" r="2.5" fill="#e080c0" opacity="0.9"/>`
+        case 'climber':
+          return `<path d="M${cx},${cy+r} Q${cx-r},${cy} ${cx},${cy-r} Q${cx+r},${cy} ${cx},${cy+r}" fill="none" stroke="#5a9030" stroke-width="1.5" opacity="0.8"/>
+                  <circle cx="${cx}" cy="${cy - r}" r="2" fill="#8ac050"/>`
+        default:
+          return `<circle cx="${cx}" cy="${cy}" r="${r * 0.6}" fill="#888" opacity="0.5"/>`
+      }
+    }
+
+    // Convert polygon points array to SVG points string
+    function polyPoints(pts) {
+      return pts.map(([x, y]) => `${tx(x)},${ty(y)}`).join(' ')
+    }
+
+    // Build zone shape path/element
+    function zoneElement(zone) {
+      const st = ZONE_STYLE[zone.type] || ZONE_STYLE.structure
+      const fill = st.fill
+      const stroke = st.stroke
+
+      if (zone.shape === 'rect') {
+        const [[x1, y1], [x2, y2]] = zone.points
+        return `<rect x="${tx(x1)}" y="${ty(y1)}" width="${tw(x2-x1)}" height="${th(y2-y1)}"
+                  fill="${fill}" stroke="${stroke}" stroke-width="1.5" rx="2"/>`
+      }
+      if (zone.shape === 'ellipse') {
+        const [[cx, cy], [rx, ry]] = zone.points
+        return `<ellipse cx="${tx(cx)}" cy="${ty(cy)}" rx="${tw(rx)}" ry="${th(ry)}"
+                  fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`
+      }
+      // polygon (default)
+      return `<polygon points="${polyPoints(zone.points)}"
+                fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`
+    }
+
+    // Zone centroid for label placement
+    function centroid(zone) {
+      if (zone.shape === 'rect') {
+        const [[x1,y1],[x2,y2]] = zone.points
+        return [tx((x1+x2)/2), ty((y1+y2)/2)]
+      }
+      if (zone.shape === 'ellipse') {
+        return [tx(zone.points[0][0]), ty(zone.points[0][1])]
+      }
+      const xs = zone.points.map(p => p[0])
+      const ys = zone.points.map(p => p[1])
+      return [tx(xs.reduce((a,b)=>a+b,0)/xs.length), ty(ys.reduce((a,b)=>a+b,0)/ys.length)]
+    }
+
+    // ── Dimension strings ─────────────────────────────────────
+    let widthStr = '', depthStr = ''
+    if (dimensionsInput) {
+      const m = dimensionsInput.match(/(\d+\.?\d*)\s*[xX×]\s*(\d+\.?\d*)/)
+      if (m) { widthStr = `${m[1]}m`; depthStr = `${m[2]}m` }
+      else { widthStr = dimensionsInput }
+    } else {
+      widthStr = `~${plan.gardenWidth || '?'}m`
+      depthStr = `~${plan.gardenDepth || '?'}m`
+    }
+
+    // ── North arrow ───────────────────────────────────────────
+    const na = plan.northAngle || 0
+    const nax = W - 38, nay = 38
+    const rad = (na * Math.PI) / 180
+    const arrowLen = 18
+    const tipX = nax + Math.sin(rad) * -arrowLen
+    const tipY = nay + Math.cos(rad) * -arrowLen
+    const tailX = nax + Math.sin(rad) * arrowLen
+    const tailY = nay + Math.cos(rad) * arrowLen
+    const northArrow = `
+      <line x1="${tailX}" y1="${tailY}" x2="${tipX}" y2="${tipY}" stroke="#333" stroke-width="2"/>
+      <polygon points="${tipX},${tipY} ${tipX + Math.cos(rad)*6},${tipY - Math.sin(rad)*6} ${tipX - Math.cos(rad)*6},${tipY + Math.sin(rad)*6}"
+               fill="#333"/>
+      <text x="${nax}" y="${nay + arrowLen + 13}" text-anchor="middle" font-size="10" font-family="Georgia,serif" fill="#333" font-weight="bold">N</text>
+    `
+
+    // ── Dimension lines ───────────────────────────────────────
+    const dimLineOffset = 28
+    const dimLines = `
+      <!-- width dimension line (bottom) -->
+      <line x1="${PAD}" y1="${H - dimLineOffset + 8}" x2="${W - PAD}" y2="${H - dimLineOffset + 8}" stroke="#555" stroke-width="1"/>
+      <line x1="${PAD}" y1="${H - dimLineOffset + 2}" x2="${PAD}" y2="${H - dimLineOffset + 14}" stroke="#555" stroke-width="1"/>
+      <line x1="${W-PAD}" y1="${H - dimLineOffset + 2}" x2="${W-PAD}" y2="${H - dimLineOffset + 14}" stroke="#555" stroke-width="1"/>
+      <text x="${W/2}" y="${H - dimLineOffset + 22}" text-anchor="middle" font-size="11" font-family="Georgia,serif" fill="#555">${widthStr}</text>
+      <!-- depth dimension line (left) -->
+      <line x1="${dimLineOffset - 8}" y1="${PAD}" x2="${dimLineOffset - 8}" y2="${H - PAD}" stroke="#555" stroke-width="1"/>
+      <line x1="${dimLineOffset - 14}" y1="${PAD}" x2="${dimLineOffset - 2}" y2="${PAD}" stroke="#555" stroke-width="1"/>
+      <line x1="${dimLineOffset - 14}" y1="${H-PAD}" x2="${dimLineOffset - 2}" y2="${H-PAD}" stroke="#555" stroke-width="1"/>
+      <text x="${dimLineOffset - 22}" y="${H/2}" text-anchor="middle" font-size="11" font-family="Georgia,serif" fill="#555"
+            transform="rotate(-90, ${dimLineOffset - 22}, ${H/2})">${depthStr}</text>
+    `
+
+    // ── House wall ────────────────────────────────────────────
+    const houseWall = `
+      <rect x="${PAD}" y="${PAD - 10}" width="${W - PAD*2}" height="10" fill="#c8b898" stroke="#8a7858" stroke-width="1.5"/>
+      <text x="${W/2}" y="${PAD - 2}" text-anchor="middle" font-size="10" font-family="Georgia,serif" fill="#5a3a18" font-style="italic">House</text>
+    `
+
+    // ── Garden boundary ───────────────────────────────────────
+    const boundary = `<rect x="${PAD}" y="${PAD}" width="${W - PAD*2}" height="${H - PAD*2}"
+                        fill="none" stroke="#888" stroke-width="2" stroke-dasharray="6,3"/>`
+
+    // ── Assemble all zone shapes ──────────────────────────────
+    const zones = (plan.zones || [])
+    const zoneShapes  = zones.map(z => zoneElement(z)).join('\n')
+
+    // ── Zone labels ───────────────────────────────────────────
+    const zoneLabels = zones.map(z => {
+      const st = ZONE_STYLE[z.type] || ZONE_STYLE.structure
+      const [cx, cy] = centroid(z)
+      return `<text x="${cx}" y="${cy + 4}" text-anchor="middle" font-size="10"
+                font-family="Georgia,serif" fill="${st.label}" font-weight="600"
+                paint-order="stroke" stroke="white" stroke-width="2.5">${z.label}</text>`
+    }).join('\n')
+
+    // ── Plant symbols ─────────────────────────────────────────
+    const plantSymbols = zones.flatMap(z => {
+      if (z.type !== 'bed' || !z.plants) return []
+      return z.plants.map(p => {
+        const px = tx(p.x), py = ty(p.y)
+        const sym = plantSymbol(p.symbol, px, py)
+        const lbl = `<text x="${px}" y="${py + 13}" text-anchor="middle" font-size="7.5"
+                       font-family="Georgia,serif" fill="#2a5a10" font-style="italic"
+                       paint-order="stroke" stroke="white" stroke-width="2">${p.label}</text>`
+        return sym + lbl
+      })
+    }).join('\n')
+
+    // ── Structures ────────────────────────────────────────────
+    const structs = (plan.structures || []).map(s => {
+      const sx = tx(s.x), sy = ty(s.y)
+      const sw = tw(s.w), sh = th(s.h)
+      const rot = s.rotation || 0
+      return `<g transform="rotate(${rot}, ${sx}, ${sy})">
+        <rect x="${sx - sw/2}" y="${sy - sh/2}" width="${sw}" height="${sh}"
+              fill="#d8c8b0" stroke="#907850" stroke-width="1.5" stroke-dasharray="3,2" rx="1"/>
+        <text x="${sx}" y="${sy + 4}" text-anchor="middle" font-size="9"
+              font-family="Georgia,serif" fill="#503020" font-style="italic">${s.label}</text>
+      </g>`
+    }).join('\n')
+
+    const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`)
+    svgEl.innerHTML = `
+      <defs>
+        <pattern id="hatch-gravel" patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(45)">
+          <line x1="0" y1="0" x2="0" y2="5" stroke="#b89870" stroke-width="0.8" opacity="0.5"/>
+        </pattern>
+      </defs>
+      <rect width="${W}" height="${H}" fill="#faf8f3"/>
+      ${boundary}
+      ${houseWall}
+      ${zoneShapes}
+      ${structs}
+      ${plantSymbols}
+      ${zoneLabels}
+      ${dimLines}
+      ${northArrow}
+      <text x="${PAD}" y="${H - 8}" font-size="10" font-family="Georgia,serif" fill="#aaa" font-style="italic">Garden Design Plan — AI generated</text>
+    `
+    return svgEl
+  }
+  }
+
+  // ── GARDEN PLAN: LEGEND ───────────────────────────────────
+  function buildPlanLegend(plan) {
+    const ZONE_STYLE = {
+      lawn:      { fill: '#c8ddb0', label: 'Lawn' },
+      patio:     { fill: '#e8dcc8', label: 'Patio' },
+      path:      { fill: '#d4c4a0', label: 'Path' },
+      bed:       { fill: '#b8d4a0', label: 'Planting bed' },
+      gravel:    { fill: '#ddd4b8', label: 'Gravel' },
+      water:     { fill: '#b8d4e8', label: 'Water feature' },
+      kids:      { fill: '#e8d8b0', label: 'Kids zone' },
+      structure: { fill: '#d8c8b0', label: 'Structure' },
+    }
+    const seen = new Set()
+    const items = (plan.zones || [])
+      .filter(z => { if (seen.has(z.type)) return false; seen.add(z.type); return true })
+      .map(z => {
+        const st = ZONE_STYLE[z.type] || { fill: '#ccc', label: z.type }
+        return `<div class="plan-legend-item">
+          <div class="plan-legend-swatch" style="background:${st.fill}"></div>
+          <span>${st.label}</span>
+        </div>`
+      }).join('')
+
+    const plantTypes = [
+      { sym: 'tree',      col: '#4a8a30', label: 'Tree' },
+      { sym: 'shrub',     col: '#6aaa40', label: 'Shrub' },
+      { sym: 'grass',     col: '#8ab840', label: 'Ornamental grass' },
+      { sym: 'perennial', col: '#c060a0', label: 'Perennial' },
+      { sym: 'climber',   col: '#5a9030', label: 'Climber' },
+    ]
+    const usedSymbols = new Set(
+      (plan.zones || []).flatMap(z => (z.plants || []).map(p => p.symbol))
+    )
+    const plantItems = plantTypes
+      .filter(p => usedSymbols.has(p.sym))
+      .map(p => `<div class="plan-legend-item">
+        <div class="plan-legend-swatch" style="background:${p.col};border-radius:50%"></div>
+        <span>${p.label}</span>
+      </div>`).join('')
+
+    const div = document.createElement('div')
+    div.className = 'plan-legend'
+    div.innerHTML = items + plantItems
+    return div
+  }
   async function runAnalysis() {
     const btn  = document.getElementById('runBtn')
     const main = document.getElementById('mainPanel')
@@ -846,6 +1198,38 @@ MAINTENANCE NOTES
           showSlotError(slot, err.message)
         }
       }))
+
+      // ── Step 5: Generate aerial garden plan ───────────────
+      setStatus('Renders complete. Generating garden plan...', 'loading')
+      try {
+        const planJson = await fetchGardenPlanJson(analysis, {
+          dimensions: document.getElementById('dimensions').value,
+          orientation: orientationVal,
+          style: styleVal,
+          features,
+        })
+        const planSection = document.createElement('div')
+        planSection.className = 'result-section'
+        planSection.innerHTML = '<h3>Garden Plan</h3>'
+        const wrap = document.createElement('div')
+        wrap.className = 'plan-wrap'
+        wrap.appendChild(renderGardenPlanSVG(planJson, document.getElementById('dimensions').value))
+        if (!document.getElementById('dimensions').value) {
+          const note = document.createElement('div')
+          note.className = 'plan-note'
+          note.textContent = 'Dimensions not entered — plan proportions are approximate.'
+          wrap.appendChild(note)
+        }
+        wrap.appendChild(buildPlanLegend(planJson))
+        planSection.appendChild(wrap)
+        main.appendChild(planSection)
+      } catch (err) {
+        console.error('Plan generation failed:', err)
+        const planSection = document.createElement('div')
+        planSection.className = 'result-section'
+        planSection.innerHTML = `<h3>Garden Plan</h3><div class="status error">Could not generate plan: ${err.message}</div>`
+        main.appendChild(planSection)
+      }
 
       setStatus('Done.', 'success')
 
