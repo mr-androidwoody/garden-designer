@@ -366,22 +366,25 @@
 
         const image = new Image()
         image.onload = () => {
-          // Keep well under 4MB — resize to max 512px
-          const maxSize = 512
-          let w = image.width, h = image.height
-          if (w > maxSize || h > maxSize) {
-            if (w > h) { h = Math.round(h * maxSize / w); w = maxSize }
-            else { w = Math.round(w * maxSize / h); h = maxSize }
-          }
+          // OpenAI requires square PNG — use 512x512
+          const size = 512
           const canvas = document.createElement('canvas')
-          canvas.width = w
-          canvas.height = h
+          canvas.width = size
+          canvas.height = size
           const ctx = canvas.getContext('2d')
-          ctx.drawImage(image, 0, 0, w, h)
+          // Fill transparent background first (ensures alpha channel)
+          ctx.clearRect(0, 0, size, size)
+          // Scale and centre the image to fill the square
+          const scale = Math.max(size / image.width, size / image.height)
+          const sw = image.width * scale
+          const sh = image.height * scale
+          const ox = (size - sw) / 2
+          const oy = (size - sh) / 2
+          ctx.drawImage(image, ox, oy, sw, sh)
           const pngDataUrl = canvas.toDataURL('image/png')
           const base64 = pngDataUrl.split(',')[1]
           const sizeKB = Math.round(base64.length * 0.75 / 1024)
-          console.log(`Image converted: ${w}x${h}, ~${sizeKB}KB`)
+          console.log(`Image ready: 512x512 square PNG, ~${sizeKB}KB`)
           uploadedPhotos.push({ base64, type: 'image/png' })
         }
         image.src = e.target.result
