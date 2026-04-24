@@ -356,13 +356,30 @@
     uploadedPhotos = []
     const grid = document.getElementById('photoGrid')
     grid.innerHTML = ''
+
     files.forEach(file => {
       const reader = new FileReader()
       reader.onload = e => {
-        uploadedPhotos.push({ base64: e.target.result.split(',')[1], type: file.type })
-        const img = document.createElement('img')
-        img.src = e.target.result
-        grid.appendChild(img)
+        // Show preview immediately
+        const previewImg = document.createElement('img')
+        previewImg.src = e.target.result
+        grid.appendChild(previewImg)
+
+        // Convert to RGBA PNG via canvas (required by OpenAI images/edits)
+        const image = new Image()
+        image.onload = () => {
+          const canvas = document.createElement('canvas')
+          canvas.width = image.width
+          canvas.height = image.height
+          const ctx = canvas.getContext('2d')
+          ctx.drawImage(image, 0, 0)
+          const pngDataUrl = canvas.toDataURL('image/png')
+          uploadedPhotos.push({
+            base64: pngDataUrl.split(',')[1],
+            type: 'image/png'
+          })
+        }
+        image.src = e.target.result
       }
       reader.readAsDataURL(file)
     })
