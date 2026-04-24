@@ -1,26 +1,542 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hello World</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Garden Designer</title>
   <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      font-family: Arial, sans-serif;
+      font-family: system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
       background: #f5f5f5;
+      color: #1a1a1a;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
 
-    h1 {
-      font-size: clamp(2.5rem, 8vw, 6rem);
-      margin: 0;
+    header {
+      background: #1a1a1a;
+      color: white;
+      padding: 14px 24px;
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
     }
+
+    .app {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── SIDEBAR ── */
+    .sidebar {
+      width: 340px;
+      min-width: 300px;
+      background: white;
+      border-right: 1px solid #ddd;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .sidebar h2 {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    /* Photo upload */
+    .upload-area {
+      border: 2px dashed #ccc;
+      border-radius: 8px;
+      padding: 24px;
+      text-align: center;
+      cursor: pointer;
+      color: #666;
+      transition: border-color 0.2s;
+    }
+    .upload-area:hover { border-color: #999; }
+    .upload-area input { display: none; }
+
+    .photo-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .photo-grid img {
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 4px;
+    }
+
+    /* Form controls */
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field label { font-size: 0.88rem; font-weight: 500; }
+
+    select, input[type="text"], input[type="number"], textarea {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      background: #fafafa;
+    }
+    select:focus, input:focus, textarea:focus {
+      outline: none;
+      border-color: #666;
+      background: white;
+    }
+    textarea { resize: vertical; min-height: 70px; }
+
+    .checkbox-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+    .checkbox-group label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.88rem;
+      font-weight: 400;
+      cursor: pointer;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 11px;
+      background: #1a1a1a;
+      color: white;
+      border: none;
+      border-radius: 7px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── MAIN PANEL ── */
+    .main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .placeholder {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #aaa;
+      font-size: 1rem;
+      text-align: center;
+      line-height: 2;
+    }
+
+    /* Result sections */
+    .result-section {
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .result-section h3 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #888;
+      margin-bottom: 12px;
+    }
+    .result-section p, .result-section li {
+      font-size: 0.93rem;
+      color: #333;
+      line-height: 1.65;
+    }
+    .result-section ul { padding-left: 18px; }
+    .result-section li { margin-bottom: 4px; }
+
+    /* Renders */
+    .render-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    .render-slot {
+      aspect-ratio: 4/3;
+      background: #f0f0f0;
+      border-radius: 8px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #aaa;
+      font-size: 0.8rem;
+      position: relative;
+    }
+    .render-slot img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .render-slot .label {
+      position: absolute;
+      bottom: 6px;
+      left: 8px;
+      background: rgba(0,0,0,0.5);
+      color: white;
+      font-size: 0.72rem;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+
+    /* Status */
+    .status {
+      font-size: 0.85rem;
+      color: #666;
+      padding: 10px 14px;
+      background: #f9f9f9;
+      border: 1px solid #eee;
+      border-radius: 6px;
+    }
+    .status.error { color: #c0392b; background: #fff5f5; border-color: #fcc; }
+    .status.success { color: #27ae60; background: #f5fff8; border-color: #bce; }
+
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid #ccc;
+      border-top-color: #555;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <h1>Hello, world!</h1>
+
+<header>AI Garden Designer</header>
+
+<div class="app">
+
+  <!-- ── SIDEBAR ── -->
+  <aside class="sidebar">
+
+    <div>
+      <h2>1. Photos</h2>
+      <div class="upload-area" onclick="document.getElementById('photoInput').click()">
+        <input type="file" id="photoInput" accept="image/*" multiple onchange="handlePhotos(this)">
+        <div>Click to upload garden photos</div>
+        <div style="font-size:0.8rem;margin-top:4px;color:#aaa">Up to 6 images</div>
+      </div>
+      <div class="photo-grid" id="photoGrid"></div>
+    </div>
+
+    <div>
+      <h2>2. Your Garden</h2>
+      <div style="display:flex;flex-direction:column;gap:12px">
+
+        <div class="field">
+          <label>Approximate size</label>
+          <input type="text" id="dimensions" placeholder="e.g. 12m x 8m" />
+        </div>
+
+        <div class="field">
+          <label>Orientation</label>
+          <select id="orientation">
+            <option value="">Select...</option>
+            <option>North-facing</option>
+            <option>South-facing</option>
+            <option>East-facing</option>
+            <option>West-facing</option>
+            <option>Not sure</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Design style</label>
+          <select id="style">
+            <option value="">Select...</option>
+            <option>Modern / contemporary</option>
+            <option>Cottage / traditional</option>
+            <option>Family garden</option>
+            <option>Low maintenance</option>
+            <option>Flower-rich</option>
+            <option>Entertaining / social</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Budget (£)</label>
+          <input type="number" id="budget" placeholder="e.g. 5000" />
+        </div>
+
+        <div class="field">
+          <label>Maintenance level</label>
+          <select id="maintenance">
+            <option value="">Select...</option>
+            <option>Low</option>
+            <option>Medium</option>
+            <option>High</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Features wanted</label>
+          <div class="checkbox-group">
+            <label><input type="checkbox" value="lawn"> Lawn</label>
+            <label><input type="checkbox" value="patio"> Patio</label>
+            <label><input type="checkbox" value="bbq"> BBQ area</label>
+            <label><input type="checkbox" value="kids"> Kids zone</label>
+            <label><input type="checkbox" value="pets"> Pet friendly</label>
+            <label><input type="checkbox" value="lighting"> Lighting</label>
+            <label><input type="checkbox" value="privacy"> Privacy</label>
+            <label><input type="checkbox" value="flowers"> Flowers</label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Anything else to know?</label>
+          <textarea id="notes" placeholder="Existing trees to keep, slopes, drainage issues..."></textarea>
+        </div>
+
+      </div>
+    </div>
+
+    <button class="btn" id="runBtn" onclick="runAnalysis()">Analyse my garden</button>
+
+  </aside>
+
+  <!-- ── MAIN PANEL ── -->
+  <main class="main" id="mainPanel">
+    <div class="placeholder">
+      Upload photos and fill in your brief,<br>then click Analyse my garden.
+    </div>
+  </main>
+
+</div>
+
+<script>
+  // ── CONFIG ──────────────────────────────────────────────
+  const PROXY = 'https://your-app.vercel.app/api/proxy'
+  // Replace the URL above with your actual Vercel deployment URL
+
+  // ── STATE ───────────────────────────────────────────────
+  let uploadedPhotos = []
+
+  // ── PHOTO HANDLING ──────────────────────────────────────
+  function handlePhotos(input) {
+    const files = Array.from(input.files).slice(0, 6)
+    uploadedPhotos = []
+    const grid = document.getElementById('photoGrid')
+    grid.innerHTML = ''
+
+    files.forEach(file => {
+      const reader = new FileReader()
+      reader.onload = e => {
+        uploadedPhotos.push({ base64: e.target.result.split(',')[1], type: file.type })
+        const img = document.createElement('img')
+        img.src = e.target.result
+        grid.appendChild(img)
+      }
+      reader.readAsDataURL(file)
+    })
+  }
+
+  // ── HELPERS ─────────────────────────────────────────────
+  function getFeatures() {
+    return Array.from(document.querySelectorAll('.checkbox-group input:checked'))
+      .map(cb => cb.value).join(', ')
+  }
+
+  function setStatus(msg, type = '') {
+    const main = document.getElementById('mainPanel')
+    let statusEl = document.getElementById('statusBar')
+    if (!statusEl) {
+      statusEl = document.createElement('div')
+      statusEl.id = 'statusBar'
+      main.prepend(statusEl)
+    }
+    statusEl.className = `status ${type}`
+    statusEl.innerHTML = type === 'loading'
+      ? `<span class="spinner"></span>${msg}`
+      : msg
+  }
+
+  function buildSection(title, content) {
+    const sec = document.createElement('div')
+    sec.className = 'result-section'
+    sec.innerHTML = `<h3>${title}</h3><div>${content}</div>`
+    return sec
+  }
+
+  // ── CALL PROXY ──────────────────────────────────────────
+  async function callClaude(prompt, images = []) {
+    const content = []
+
+    images.forEach(img => {
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: img.type, data: img.base64 }
+      })
+    })
+    content.push({ type: 'text', text: prompt })
+
+    const res = await fetch(PROXY, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        service: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content }]
+      })
+    })
+    const data = await res.json()
+    if (data.error) throw new Error(data.error.message || 'Anthropic error')
+    return data.content[0].text
+  }
+
+  // ── MAIN FLOW ───────────────────────────────────────────
+  async function runAnalysis() {
+    const btn = document.getElementById('runBtn')
+    const main = document.getElementById('mainPanel')
+
+    // Basic validation
+    if (uploadedPhotos.length === 0) {
+      alert('Please upload at least one photo of your garden.')
+      return
+    }
+
+    // Clear previous results
+    main.innerHTML = ''
+    btn.disabled = true
+
+    try {
+      // Step 1: Site analysis
+      setStatus('Analysing your garden...', 'loading')
+
+      const brief = `
+You are an expert UK garden designer. Analyse the garden photos provided and the brief below.
+
+Brief:
+- Dimensions: ${document.getElementById('dimensions').value || 'unknown'}
+- Orientation: ${document.getElementById('orientation').value || 'unknown'}
+- Style: ${document.getElementById('style').value || 'not specified'}
+- Budget: £${document.getElementById('budget').value || 'not specified'}
+- Maintenance: ${document.getElementById('maintenance').value || 'not specified'}
+- Features wanted: ${getFeatures() || 'none specified'}
+- Notes: ${document.getElementById('notes').value || 'none'}
+
+Respond in this exact format:
+
+SITE ANALYSIS
+[2-3 sentences describing what you can see in the photos: approximate size, orientation clues, existing features, condition]
+
+OPPORTUNITIES
+[3-5 bullet points of design opportunities]
+
+CONSTRAINTS
+[2-4 bullet points of challenges or things to work around]
+
+CONCEPT
+[2-3 sentences describing the recommended design approach for this specific garden and brief]
+
+PLANTING HIGHLIGHTS
+[4-6 recommended plants with brief reason for each, suitable for the style and conditions]
+
+COST BREAKDOWN
+[6-8 line items with approximate £ costs adding up to roughly the stated budget]
+
+MAINTENANCE NOTES
+[3-4 sentences on seasonal tasks for the chosen maintenance level]
+      `.trim()
+
+      const analysis = await callClaude(brief, uploadedPhotos)
+
+      // Parse and render sections
+      setStatus('Analysis complete. Rendering results...', 'success')
+
+      const sections = parseAnalysis(analysis)
+      sections.forEach(s => main.appendChild(buildSection(s.title, s.html)))
+
+      // Step 2: Render placeholders (image generation to be wired up next)
+      const renderSection = document.createElement('div')
+      renderSection.className = 'result-section'
+      renderSection.innerHTML = `
+        <h3>Garden Renders</h3>
+        <div class="render-grid">
+          <div class="render-slot">Morning view<div class="label">Morning</div></div>
+          <div class="render-slot">Afternoon view<div class="label">Afternoon</div></div>
+          <div class="render-slot">Evening view<div class="label">Evening</div></div>
+        </div>
+        <p style="margin-top:12px;font-size:0.83rem;color:#999">
+          Image generation coming next — renders will appear here.
+        </p>
+      `
+      main.appendChild(renderSection)
+
+    } catch (err) {
+      setStatus(`Error: ${err.message}`, 'error')
+      console.error(err)
+    } finally {
+      btn.disabled = false
+    }
+  }
+
+  // ── PARSE CLAUDE RESPONSE ────────────────────────────────
+  function parseAnalysis(text) {
+    const sectionNames = [
+      'SITE ANALYSIS', 'OPPORTUNITIES', 'CONSTRAINTS',
+      'CONCEPT', 'PLANTING HIGHLIGHTS', 'COST BREAKDOWN', 'MAINTENANCE NOTES'
+    ]
+    const results = []
+
+    sectionNames.forEach((name, i) => {
+      const start = text.indexOf(name)
+      if (start === -1) return
+      const nextName = sectionNames.slice(i + 1).find(n => text.indexOf(n) > start)
+      const end = nextName ? text.indexOf(nextName) : text.length
+      const content = text.slice(start + name.length, end).trim()
+
+      // Convert bullet lines to <ul>
+      const lines = content.split('\n').filter(l => l.trim())
+      let html = ''
+      const hasBullets = lines.some(l => l.trim().startsWith('-') || l.trim().startsWith('•'))
+
+      if (hasBullets) {
+        html = '<ul>' + lines
+          .filter(l => l.trim())
+          .map(l => `<li>${l.replace(/^[-•]\s*/, '')}</li>`)
+          .join('') + '</ul>'
+      } else {
+        html = lines.map(l => `<p>${l}</p>`).join('')
+      }
+
+      results.push({ title: name.charAt(0) + name.slice(1).toLowerCase(), html })
+    })
+
+    return results
+  }
+</script>
+
 </body>
 </html>
