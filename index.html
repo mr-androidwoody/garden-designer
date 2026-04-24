@@ -673,23 +673,76 @@ MAINTENANCE NOTES
       renderSection.innerHTML = `<h3>Garden Renders</h3><div class="render-grid" id="renderGrid"></div>`
       main.appendChild(renderSection)
 
-      // Time-of-day descriptors with richer lighting, shadow and mood language
+      // ── Orientation-aware lighting ────────────────────────
+      //
+      // The camera always points away from the house into the garden.
+      // All sun directions are described relative to that camera view.
+      // Sun rises roughly ENE, reaches its highest point in the south at
+      // midday, and sets roughly WNW — standard UK latitude assumptions.
+      //
+      // Each entry has three time-of-day lighting descriptions: morning,
+      // midday, evening. Descriptions cover: sun position and angle,
+      // whether direct sunlight falls on the garden, shadow direction and
+      // length, sky colour and brightness, and atmospheric mood.
+
+      const ORIENTATION_LIGHTING = {
+        'South-facing': {
+          morning: 'Low morning sun rising to the left of the scene (east). Warm golden raking light across the garden from the left. Long shadows pointing right. Dew on plants. Fresh cool atmosphere.',
+          midday:  'Sun is behind the camera to the north, garden fully and evenly front-lit. Short shadows, bright vivid colours, clear blue sky.',
+          evening: 'Low evening sun setting to the right of the scene (west). Warm amber raking light from the right. Long shadows pointing left. Golden-hour glow across the garden.',
+        },
+        'North-facing': {
+          morning: 'Morning sun rising behind and slightly to the right of the camera (east). Garden is front-lit with soft cool light from behind the camera. No direct sun in the garden yet. House facade in shadow. Pale blue sky ahead.',
+          midday:  'Sun is directly behind the camera to the south, shining into the garden. Garden fully front-lit with bright overhead light. Short soft shadows. Clear bright sky.',
+          evening: 'Evening sun setting behind and to the right of the camera (west). Garden is in cool open shade, no direct sunlight reaching the lawn. The sky above the garden ahead is a warm blue-to-amber gradient. Soft ambient glow, no harsh shadows. Garden lights beginning to glow.',
+        },
+        'East-facing': {
+          morning: 'Morning sun rising directly ahead, shooting straight toward the camera at low angle. Strong front-lit scene, slight lens flare or haze from the low eastern sun ahead. Plants backlit at edges, warm orange sky directly ahead on the horizon.',
+          midday:  'Sun has moved to the camera\'s right (south). Lateral raking light from the right. Shadows pointing left across the lawn and path. Clear blue sky.',
+          evening: 'Evening sun setting behind the camera (west). Garden is in open shade, no direct sunlight on the lawn or plants. House roofline behind the camera may cast long shadows forward into the garden. Cool blue-grey light in the garden, warm amber sky visible above ahead.',
+        },
+        'West-facing': {
+          morning: 'Morning sun rising behind the camera (east). Garden front-lit with soft cool early light from behind. No direct sun visible in scene. House roofline behind may cast a long forward shadow across the garden. Pale cool sky ahead.',
+          midday:  'Sun has moved to the camera\'s left (south). Lateral light from the left. Shadows pointing right. Bright clear day.',
+          evening: 'Evening sun setting directly ahead, shooting toward the camera at a very low angle. Dramatic golden-hour scene: sun visible low on the horizon or just above rooflines ahead. Strong warm backlit glow on all plants and structures. Long shadows pointing directly toward the camera. Lens flare. Vivid amber and orange sky.',
+        },
+        'North-east-facing': {
+          morning: 'Morning sun rising slightly to the right of ahead (east-northeast). Warm front-lit scene with gentle raking from the right. Long shadows to the left. Dew on plants.',
+          midday:  'Sun to the right and behind (south). Light from the right-rear, moderate lateral shadows pointing left-forward. Bright clear sky.',
+          evening: 'Evening sun setting to the left and behind the camera (west). Garden in open shade, no direct sunlight. Cool ambient light. Warm sky glow visible above and to the left. Garden lighting on.',
+        },
+        'North-west-facing': {
+          morning: 'Morning sun rising to the right and behind the camera (east). Garden front-lit with soft cool light from behind-right. No direct sun visible ahead. Pale sky.',
+          midday:  'Sun to the left and behind (south). Light from the left-rear, shadows pointing right-forward. Bright clear day.',
+          evening: 'Evening sun setting slightly to the right of ahead (west-northwest). Warm golden front-lit scene, raking light from the right-front. Long shadows to the left. Warm amber sky ahead to the right.',
+        },
+        'South-east-facing': {
+          morning: 'Morning sun rising to the left of ahead (east-southeast). Strong warm front-lit raking light from the left. Long shadows pointing right. Bright warm sky to the left.',
+          midday:  'Sun slightly to the left and behind (south). Bright front-lit scene with slight left-side emphasis. Short shadows. Clear blue sky.',
+          evening: 'Evening sun setting to the right and behind the camera (west). Garden in open shade. Cool ambient light. Warm sky glow above and to the right. Garden lighting on.',
+        },
+        'South-west-facing': {
+          morning: 'Morning sun rising behind and to the left of the camera (east). Garden lit from behind-left. Soft cool front light in the garden. Pale sky ahead.',
+          midday:  'Sun slightly to the right and behind (south). Bright light from behind-right. Shadows pointing left-forward. Clear bright day.',
+          evening: 'Evening sun setting to the left of ahead (west-southwest). Warm golden front-lit raking light from the left. Long shadows pointing right. Vivid amber sky to the left ahead.',
+        },
+        'Not sure': {
+          morning: 'Soft golden morning light from a low sun to one side. Long shadows across the garden. Dew on foliage. Fresh cool atmosphere.',
+          midday:  'Bright overhead midday sun, short crisp shadows, vivid saturated colours, clear blue sky.',
+          evening: 'Warm low evening sun, long shadows stretching across the garden, golden-hour glow, garden lighting beginning to glow, atmospheric haze.',
+        },
+      }
+
+      // Default fallback if orientation is blank or unrecognised
+      const DEFAULT_LIGHTING = ORIENTATION_LIGHTING['Not sure']
+
+      const orientationVal = document.getElementById('orientation').value || 'Not sure'
+      const lighting = ORIENTATION_LIGHTING[orientationVal] || DEFAULT_LIGHTING
+
       const timeOfDay = [
-        {
-          id: 'slot-morning',
-          label: 'Morning',
-          description: 'Soft golden morning light raking across the garden from a low eastern sun. Long gentle shadows, dew on foliage and petals, fresh cool atmosphere, slight mist in background.',
-        },
-        {
-          id: 'slot-afternoon',
-          label: 'Afternoon',
-          description: 'Bright overhead midday sun, short crisp shadows directly beneath plants and structures, vivid saturated colours, clear blue sky, warm summer feel.',
-        },
-        {
-          id: 'slot-evening',
-          label: 'Evening',
-          description: 'Warm amber low evening sun from the west, long dramatic shadows stretching across the garden, golden-hour glow on foliage, soft garden path lighting and lanterns beginning to glow, atmospheric haze.',
-        },
+        { id: 'slot-morning',   label: 'Morning',   description: lighting.morning },
+        { id: 'slot-afternoon', label: 'Afternoon',  description: lighting.midday  },
+        { id: 'slot-evening',   label: 'Evening',    description: lighting.evening },
       ]
 
       const grid = document.getElementById('renderGrid')
