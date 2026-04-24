@@ -54,7 +54,6 @@
       margin-bottom: 6px;
     }
 
-    /* Photo upload */
     .upload-area {
       border: 2px dashed #ccc;
       border-radius: 8px;
@@ -80,7 +79,6 @@
       border-radius: 4px;
     }
 
-    /* Form controls */
     .field { display: flex; flex-direction: column; gap: 5px; }
     .field label { font-size: 0.88rem; font-weight: 500; }
 
@@ -150,7 +148,6 @@
       line-height: 2;
     }
 
-    /* Result sections */
     .result-section {
       background: white;
       border: 1px solid #ddd;
@@ -172,7 +169,6 @@
     .result-section ul { padding-left: 18px; }
     .result-section li { margin-bottom: 4px; }
 
-    /* Renders */
     .render-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -188,9 +184,13 @@
       justify-content: center;
       color: #aaa;
       font-size: 0.8rem;
+      text-align: center;
       position: relative;
+      padding: 8px;
     }
     .render-slot img {
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
       object-fit: cover;
@@ -204,9 +204,13 @@
       font-size: 0.72rem;
       padding: 2px 7px;
       border-radius: 4px;
+      z-index: 1;
+    }
+    .render-slot.generating {
+      flex-direction: column;
+      gap: 8px;
     }
 
-    /* Status */
     .status {
       font-size: 0.85rem;
       color: #666;
@@ -216,7 +220,7 @@
       border-radius: 6px;
     }
     .status.error { color: #c0392b; background: #fff5f5; border-color: #fcc; }
-    .status.success { color: #27ae60; background: #f5fff8; border-color: #bce; }
+    .status.success { color: #27ae60; background: #f5fff8; border-color: #ace; }
 
     .spinner {
       display: inline-block;
@@ -227,6 +231,13 @@
       animation: spin 0.7s linear infinite;
       margin-right: 8px;
       vertical-align: middle;
+    }
+    .spinner-lg {
+      width: 20px; height: 20px;
+      border: 2px solid #ddd;
+      border-top-color: #888;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
@@ -335,20 +346,16 @@
 </div>
 
 <script>
-  // ── CONFIG ──────────────────────────────────────────────
   const PROXY = 'https://garden-designer-eight.vercel.app/api/proxy'
-  // Replace the URL above with your actual Vercel deployment URL
 
-  // ── STATE ───────────────────────────────────────────────
   let uploadedPhotos = []
 
-  // ── PHOTO HANDLING ──────────────────────────────────────
+  // ── PHOTO HANDLING ───────────────────────────────────────
   function handlePhotos(input) {
     const files = Array.from(input.files).slice(0, 6)
     uploadedPhotos = []
     const grid = document.getElementById('photoGrid')
     grid.innerHTML = ''
-
     files.forEach(file => {
       const reader = new FileReader()
       reader.onload = e => {
@@ -361,7 +368,7 @@
     })
   }
 
-  // ── HELPERS ─────────────────────────────────────────────
+  // ── HELPERS ──────────────────────────────────────────────
   function getFeatures() {
     return Array.from(document.querySelectorAll('.checkbox-group input:checked'))
       .map(cb => cb.value).join(', ')
@@ -369,16 +376,14 @@
 
   function setStatus(msg, type = '') {
     const main = document.getElementById('mainPanel')
-    let statusEl = document.getElementById('statusBar')
-    if (!statusEl) {
-      statusEl = document.createElement('div')
-      statusEl.id = 'statusBar'
-      main.prepend(statusEl)
+    let el = document.getElementById('statusBar')
+    if (!el) {
+      el = document.createElement('div')
+      el.id = 'statusBar'
+      main.prepend(el)
     }
-    statusEl.className = `status ${type}`
-    statusEl.innerHTML = type === 'loading'
-      ? `<span class="spinner"></span>${msg}`
-      : msg
+    el.className = `status ${type}`
+    el.innerHTML = type === 'loading' ? `<span class="spinner"></span>${msg}` : msg
   }
 
   function buildSection(title, content) {
@@ -388,16 +393,13 @@
     return sec
   }
 
-  // ── CALL PROXY ──────────────────────────────────────────
+  // ── API CALLS ────────────────────────────────────────────
   async function callClaude(prompt, images = []) {
     const content = []
-
-    images.forEach(img => {
-      content.push({
-        type: 'image',
-        source: { type: 'base64', media_type: img.type, data: img.base64 }
-      })
-    })
+    images.forEach(img => content.push({
+      type: 'image',
+      source: { type: 'base64', media_type: img.type, data: img.base64 }
+    }))
     content.push({ type: 'text', text: prompt })
 
     const res = await fetch(PROXY, {
@@ -415,23 +417,61 @@
     return data.content[0].text
   }
 
-  // ── MAIN FLOW ───────────────────────────────────────────
+  async function generateRender(prompt, photo) {
+    const res = await fetch(PROXY, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        service: 'openai-image',
+        prompt,
+        imageBase64: photo.base64,
+        imageType: photo.type,
+      })
+    })
+    const data = await res.json()
+    if (data.error) throw new Error(data.error.message || 'OpenAI error')
+    const img = data.data?.[0]
+    if (!img) throw new Error('No image returned')
+    return img.url || `data:image/png;base64,${img.b64_json}`
+  }
+
+  // ── PARSE CLAUDE RESPONSE ─────────────────────────────────
+  function parseAnalysis(text) {
+    const sectionNames = [
+      'SITE ANALYSIS', 'OPPORTUNITIES', 'CONSTRAINTS',
+      'CONCEPT', 'PLANTING HIGHLIGHTS', 'COST BREAKDOWN', 'MAINTENANCE NOTES'
+    ]
+    return sectionNames.reduce((results, name, i) => {
+      const start = text.indexOf(name)
+      if (start === -1) return results
+      const nextName = sectionNames.slice(i + 1).find(n => text.indexOf(n) > start)
+      const end = nextName ? text.indexOf(nextName) : text.length
+      const content = text.slice(start + name.length, end).trim()
+      const lines = content.split('\n').filter(l => l.trim())
+      const hasBullets = lines.some(l => /^[-•]/.test(l.trim()))
+      const html = hasBullets
+        ? '<ul>' + lines.map(l => `<li>${l.replace(/^[-•]\s*/, '')}</li>`).join('') + '</ul>'
+        : lines.map(l => `<p>${l}</p>`).join('')
+      results.push({ title: name.charAt(0) + name.slice(1).toLowerCase(), html })
+      return results
+    }, [])
+  }
+
+  // ── MAIN FLOW ─────────────────────────────────────────────
   async function runAnalysis() {
     const btn = document.getElementById('runBtn')
     const main = document.getElementById('mainPanel')
 
-    // Basic validation
     if (uploadedPhotos.length === 0) {
       alert('Please upload at least one photo of your garden.')
       return
     }
 
-    // Clear previous results
     main.innerHTML = ''
     btn.disabled = true
 
     try {
-      // Step 1: Site analysis
+      // Step 1: Site analysis via Claude
       setStatus('Analysing your garden...', 'loading')
 
       const brief = `
@@ -446,10 +486,10 @@ Brief:
 - Features wanted: ${getFeatures() || 'none specified'}
 - Notes: ${document.getElementById('notes').value || 'none'}
 
-Respond in this exact format:
+Respond in this exact format with these exact section headings:
 
 SITE ANALYSIS
-[2-3 sentences describing what you can see in the photos: approximate size, orientation clues, existing features, condition]
+[2-3 sentences describing what you can see: approximate size, orientation clues, existing features, condition]
 
 OPPORTUNITIES
 [3-5 bullet points of design opportunities]
@@ -471,28 +511,59 @@ MAINTENANCE NOTES
       `.trim()
 
       const analysis = await callClaude(brief, uploadedPhotos)
-
-      // Parse and render sections
-      setStatus('Analysis complete. Rendering results...', 'success')
-
       const sections = parseAnalysis(analysis)
+
+      setStatus('Analysis complete. Generating renders...', 'loading')
       sections.forEach(s => main.appendChild(buildSection(s.title, s.html)))
 
-      // Step 2: Render placeholders (image generation to be wired up next)
+      // Step 2: Garden renders via OpenAI
       const renderSection = document.createElement('div')
       renderSection.className = 'result-section'
-      renderSection.innerHTML = `
-        <h3>Garden Renders</h3>
-        <div class="render-grid">
-          <div class="render-slot">Morning view<div class="label">Morning</div></div>
-          <div class="render-slot">Afternoon view<div class="label">Afternoon</div></div>
-          <div class="render-slot">Evening view<div class="label">Evening</div></div>
-        </div>
-        <p style="margin-top:12px;font-size:0.83rem;color:#999">
-          Image generation coming next — renders will appear here.
-        </p>
-      `
+      renderSection.innerHTML = `<h3>Garden Renders</h3><div class="render-grid" id="renderGrid"></div>`
       main.appendChild(renderSection)
+
+      const timeOfDay = [
+        { id: 'slot-morning',   label: 'Morning',   light: 'soft golden morning light, dew on plants, fresh atmosphere' },
+        { id: 'slot-afternoon', label: 'Afternoon', light: 'bright midday sun, vivid colours, clear blue sky' },
+        { id: 'slot-evening',   label: 'Evening',   light: 'warm low evening sun, long shadows, soft garden lighting glowing' },
+      ]
+
+      const grid = document.getElementById('renderGrid')
+      timeOfDay.forEach(({ id, label }) => {
+        const slot = document.createElement('div')
+        slot.className = 'render-slot generating'
+        slot.id = id
+        slot.innerHTML = `<div class="spinner-lg"></div><div>${label}</div>`
+        grid.appendChild(slot)
+      })
+
+      const conceptText = sections.find(s => s.title === 'Concept')
+        ?.html.replace(/<[^>]+>/g, '') || ''
+      const styleVal = document.getElementById('style').value || 'contemporary'
+      const basePhoto = uploadedPhotos[0]
+
+      // Fire all three renders in parallel
+      await Promise.all(timeOfDay.map(async ({ id, label, light }) => {
+        const slot = document.getElementById(id)
+        try {
+          const prompt = `Transform this garden into a beautifully designed ${styleVal} UK garden. ${conceptText} ${light}. Photorealistic garden design render. Preserve the house walls, roofline, fences and boundary structures exactly as in the original photo.`
+          const imgUrl = await generateRender(prompt, basePhoto)
+          const img = document.createElement('img')
+          img.src = imgUrl
+          slot.innerHTML = ''
+          slot.classList.remove('generating')
+          slot.appendChild(img)
+          const lbl = document.createElement('div')
+          lbl.className = 'label'
+          lbl.textContent = label
+          slot.appendChild(lbl)
+        } catch (err) {
+          slot.classList.remove('generating')
+          slot.innerHTML = `<div style="color:#c0392b;font-size:0.78rem;padding:8px">Failed: ${err.message}</div>`
+        }
+      }))
+
+      setStatus('Done.', 'success')
 
     } catch (err) {
       setStatus(`Error: ${err.message}`, 'error')
@@ -500,41 +571,6 @@ MAINTENANCE NOTES
     } finally {
       btn.disabled = false
     }
-  }
-
-  // ── PARSE CLAUDE RESPONSE ────────────────────────────────
-  function parseAnalysis(text) {
-    const sectionNames = [
-      'SITE ANALYSIS', 'OPPORTUNITIES', 'CONSTRAINTS',
-      'CONCEPT', 'PLANTING HIGHLIGHTS', 'COST BREAKDOWN', 'MAINTENANCE NOTES'
-    ]
-    const results = []
-
-    sectionNames.forEach((name, i) => {
-      const start = text.indexOf(name)
-      if (start === -1) return
-      const nextName = sectionNames.slice(i + 1).find(n => text.indexOf(n) > start)
-      const end = nextName ? text.indexOf(nextName) : text.length
-      const content = text.slice(start + name.length, end).trim()
-
-      // Convert bullet lines to <ul>
-      const lines = content.split('\n').filter(l => l.trim())
-      let html = ''
-      const hasBullets = lines.some(l => l.trim().startsWith('-') || l.trim().startsWith('•'))
-
-      if (hasBullets) {
-        html = '<ul>' + lines
-          .filter(l => l.trim())
-          .map(l => `<li>${l.replace(/^[-•]\s*/, '')}</li>`)
-          .join('') + '</ul>'
-      } else {
-        html = lines.map(l => `<p>${l}</p>`).join('')
-      }
-
-      results.push({ title: name.charAt(0) + name.slice(1).toLowerCase(), html })
-    })
-
-    return results
   }
 </script>
 
