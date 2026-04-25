@@ -378,17 +378,14 @@
 
         const image = new Image()
         image.onload = () => {
-          // OpenAI requires square PNG — use 1024x1024, padded (contain) to preserve full garden geometry
-          const size = 1024
+          // OpenAI requires square PNG — use 512x512
+          const size = 512
           const canvas = document.createElement('canvas')
           canvas.width = size
           canvas.height = size
           const ctx = canvas.getContext('2d')
-          // Fill with white so padding is neutral, not transparent
-          ctx.fillStyle = '#ffffff'
-          ctx.fillRect(0, 0, size, size)
-          // contain: scale down to fit, no cropping
-          const scale = Math.min(size / image.width, size / image.height)
+          ctx.clearRect(0, 0, size, size)
+          const scale = Math.max(size / image.width, size / image.height)
           const sw = image.width * scale
           const sh = image.height * scale
           const ox = (size - sw) / 2
@@ -397,7 +394,7 @@
           const pngDataUrl = canvas.toDataURL('image/png')
           const base64 = pngDataUrl.split(',')[1]
           const sizeKB = Math.round(base64.length * 0.75 / 1024)
-          console.log(`Image ready: 1024x1024 padded PNG, ~${sizeKB}KB`)
+          console.log(`Image ready: 512x512 square PNG, ~${sizeKB}KB`)
           uploadedPhotos.push({ base64, type: 'image/png' })
         }
         image.src = e.target.result
@@ -526,64 +523,72 @@
     }, [])
   }
 
-  // ── CANONICAL DESIGN SPEC ────────────────────────────────
-  //
-  // Second Claude call that distils narrative analysis into a terse, factual
-  // design specification (max ~80 words). Injected verbatim into all three
-  // render prompts so they share identical design DNA — far more lockable
-  // than the previous keyword-scraping approach.
-  //
-  async function fetchDesignSpec(analysisText, brief) {
-    const prompt = `
-You are a garden designer. Based on the analysis and brief below, produce a terse design specification
-for a photorealistic garden render. Write only short declarative sentences. No bullet points. No headings.
-No filler words. Maximum 80 words. Cover: patio material and size, path material and route, lawn shape,
-key planting (up to 5 plant names), any structures (pergola, raised beds, fencing), and overall style.
-This spec will be used verbatim in an image generation prompt so every word must be visually meaningful.
-
-Brief:
-- Style: ${brief.style}
-- Features: ${brief.features}
-- Maintenance: ${brief.maintenance}
-
-Analysis:
-${analysisText}
-
-Respond with the specification only. No preamble.
-    `.trim()
-    return await callClaude(prompt, [])
-  }
-
   // ── IMAGE PROMPT BUILDER ──────────────────────────────────
   //
-  // All three renders share the same structure:
-  //   1. PRESERVE list (structural anchors — first for maximum model attention)
-  //   2. Canonical design spec (shared verbatim across all three renders)
-  //   3. Style and features
-  //   4. Lighting (the only variable between the three renders)
+  // Extracts the most visually relevant content from the Claude sections
+  // and composes a detailed, structured prompt for the OpenAI image edit.
   //
-  // Lighting is a single clause at the end — a narrow modifier, not a new brief.
-  // All three renders use this same function with the same designSpec, ensuring
-  // consistent design DNA. None are chained off a previous render's output.
-  //
-  function buildRenderPrompt(designSpec, style, features, lighting) {
-    const preserveBlock = [
-      `PRESERVE EXACTLY: house walls, roofline, windows, conservatory, all fences, boundary walls, and garden dimensions from the original photo.`,
-      `Do not move, add, or remove any boundary structure.`,
-    ].join(' ')
+  function buildImagePrompt(sections, style, features, lighting) {
+    const get = (title) => {
+      const s = sections.find(s => s.title.toLowerCase() === title.toLowerCase())
+      return s ? toPlainText(s.html) : ''
+    }
 
-    const designBlock = [
-      `Photorealistic garden design render. ${style || 'Contemporary'} UK garden.`,
-      designSpec,
-      features ? `Garden features: ${features}.` : '',
-    ].filter(Boolean).join(' ')
+    // Condense planting highlights to a compact comma list (strip filler words)
+    const plantingRaw = get('Planting highlights')
+    // Each line is typically "Plant name - reason". We keep just the plant names.
+    const plants = plantingRaw
+      .split(/[,.]/)
+      .map(p => p.replace(/\s*[-–]\s*.+/, '').trim())
+      .filter(p => p.length > 2 && p.length < 60)
+      .slice(0, 6)
+      .join(', ')
 
-    const lightingBlock = `Lighting: ${lighting.description}`
+    const concept     = get('Concept')
+    const siteAnalysis = get('Site analysis')
+    const maintenance  = get('Maintenance notes')
+
+    // Extract hard landscaping clues from concept + site analysis
+    const hardLandscaping = [concept, siteAnalysis]
+      .join(' ')
+      .match(/\b(patio|path|gravel|decking|paving|pergola|raised bed|wall|fence|steps|terrace|sleepers|edging)\b/gi)
+    const hardFeatures = hardLandscaping
+      ? [...new Set(hardLandscaping.map(w => w.toLowerCase()))].join(', ')
+      : ''
+
+    const featuresLine = features ? `Features: ${features}.` : ''
+    const hardLine     = hardFeatures ? `Hard landscaping: ${hardFeatures}.` : ''
+    const plantsLine   = plants ? `Key plants: ${plants}.` : ''
+    const maintLine    = maintenance ? `Maintenance level: ${maintenance.split('.')[0]}.` : ''
 
     return [
-      preserveBlock,
-      designBlock,
-      lightingBlock,
+      `Photorealistic garden design render of a redesigned ${style || 'contemporary'} UK garden.`,
+      concept,
+      hardLine,
+      plantsLine,
+      featuresLine,
+      maintLine,
+      lighting.description,
+      `Preserve the house walls, roofline, fences and all boundary structures exactly as in the original photo.`,
+      `No people. No text. No watermarks.`,
+    ].filter(Boolean).join(' ')
+  }
+
+  // Re-light prompt for renders 2 and 3.
+  // The design is locked to render 1 — only lighting and atmosphere change.
+  // Locking instructions come first and are maximally specific; the lighting
+  // change is a single clause at the end so the model treats it as a narrow
+  // modification rather than a new creative brief.
+  function buildRelightPrompt(style, features, lighting) {
+    return [
+      `IMPORTANT: Do not change the garden design. This is a relighting only.`,
+      `Copy the input image exactly: every plant species, plant position, plant size, and planting arrangement must be pixel-for-pixel identical to the input image.`,
+      `The path shape, path material, and path position must be exactly as in the input image.`,
+      `The pergola, if present, must stay in exactly the same position and with the same structure as in the input image.`,
+      `All furniture, pots, and decorative objects must remain in exactly the same positions as in the input image.`,
+      `The lawn shape and all border shapes must be exactly as in the input image.`,
+      `The house walls, roofline, conservatory, windows, fences, and all boundary structures must be exactly as in the input image.`,
+      `The only permitted change is the lighting and sky: apply ${lighting.label.toLowerCase()} conditions — ${lighting.description}`,
       `No people. No text. No watermarks.`,
     ].join(' ')
   }
@@ -622,10 +627,7 @@ Garden brief:
 - Style: ${brief.style}
 - Features: ${brief.features}
 
-Canonical design specification (authoritative — use this to determine materials, plants, and structures):
-${brief.designSpec || ''}
-
-Garden design analysis (additional context):
+Garden design analysis:
 ${analysisText}
 
 Produce a JSON object describing the garden layout. Use a coordinate space where:
@@ -706,16 +708,15 @@ Rules:
     const th = h => (h / 100) * (H - PAD * 2)
 
     // Zone colour palette — earthy, architectural
-    // texture: optional SVG pattern id to overlay on the fill for material feel
     const ZONE_STYLE = {
-      lawn:      { fill: '#c8ddb0', stroke: '#8aad5a', label: '#3a6b1a', texture: 'hatch-lawn'   },
-      patio:     { fill: '#e8dcc8', stroke: '#b8a882', label: '#5c4a20', texture: 'hatch-patio'  },
-      path:      { fill: '#d4c4a0', stroke: '#a89060', label: '#5c4020', texture: 'hatch-path'   },
-      bed:       { fill: '#b8d4a0', stroke: '#6a9940', label: '#2a5a10'                          },
-      gravel:    { fill: '#ddd4b8', stroke: '#a89870', label: '#5c4820', texture: 'hatch-gravel' },
-      water:     { fill: '#b8d4e8', stroke: '#5090b8', label: '#105880'                          },
-      kids:      { fill: '#e8d8b0', stroke: '#c0a040', label: '#7a5800'                          },
-      structure: { fill: '#d8c8b8', stroke: '#907860', label: '#503020'                          },
+      lawn:      { fill: '#c8ddb0', stroke: '#8aad5a', label: '#3a6b1a' },
+      patio:     { fill: '#e8dcc8', stroke: '#b8a882', label: '#5c4a20' },
+      path:      { fill: '#d4c4a0', stroke: '#a89060', label: '#5c4020' },
+      bed:       { fill: '#b8d4a0', stroke: '#6a9940', label: '#2a5a10' },
+      gravel:    { fill: '#ddd4b8', stroke: '#a89870', label: '#5c4820' },
+      water:     { fill: '#b8d4e8', stroke: '#5090b8', label: '#105880' },
+      kids:      { fill: '#e8d8b0', stroke: '#c0a040', label: '#7a5800' },
+      structure: { fill: '#d8c8b8', stroke: '#907860', label: '#503020' },
     }
 
     // Plant symbol renderers — hand-drawn feel using SVG primitives
@@ -756,29 +757,25 @@ Rules:
       return pts.map(([x, y]) => `${tx(x)},${ty(y)}`).join(' ')
     }
 
-    // Build zone shape — base fill + optional texture overlay
+    // Build zone shape path/element
     function zoneElement(zone) {
       const st = ZONE_STYLE[zone.type] || ZONE_STYLE.structure
-      const fill   = st.fill
+      const fill = st.fill
       const stroke = st.stroke
-      const tex    = st.texture ? `url(#${st.texture})` : 'none'
 
       if (zone.shape === 'rect') {
         const [[x1, y1], [x2, y2]] = zone.points
-        const attrs = `x="${tx(x1)}" y="${ty(y1)}" width="${tw(x2-x1)}" height="${th(y2-y1)}" rx="2"`
-        return `<rect ${attrs} fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>` +
-               (tex !== 'none' ? `<rect ${attrs} fill="${tex}" stroke="none"/>` : '')
+        return `<rect x="${tx(x1)}" y="${ty(y1)}" width="${tw(x2-x1)}" height="${th(y2-y1)}"
+                  fill="${fill}" stroke="${stroke}" stroke-width="1.5" rx="2"/>`
       }
       if (zone.shape === 'ellipse') {
         const [[cx, cy], [rx, ry]] = zone.points
-        const attrs = `cx="${tx(cx)}" cy="${ty(cy)}" rx="${tw(rx)}" ry="${th(ry)}"`
-        return `<ellipse ${attrs} fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>` +
-               (tex !== 'none' ? `<ellipse ${attrs} fill="${tex}" stroke="none"/>` : '')
+        return `<ellipse cx="${tx(cx)}" cy="${ty(cy)}" rx="${tw(rx)}" ry="${th(ry)}"
+                  fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`
       }
       // polygon (default)
-      const pts = `points="${polyPoints(zone.points)}"`
-      return `<polygon ${pts} fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>` +
-             (tex !== 'none' ? `<polygon ${pts} fill="${tex}" stroke="none"/>` : '')
+      return `<polygon points="${polyPoints(zone.points)}"
+                fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`
     }
 
     // Zone centroid for label placement
@@ -891,23 +888,8 @@ Rules:
     svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`)
     svgEl.innerHTML = `
       <defs>
-        <!-- Gravel: diagonal lines -->
         <pattern id="hatch-gravel" patternUnits="userSpaceOnUse" width="5" height="5" patternTransform="rotate(45)">
           <line x1="0" y1="0" x2="0" y2="5" stroke="#b89870" stroke-width="0.8" opacity="0.5"/>
-        </pattern>
-        <!-- Patio: cross-hatch for paving texture -->
-        <pattern id="hatch-patio" patternUnits="userSpaceOnUse" width="12" height="12">
-          <rect width="12" height="12" fill="none"/>
-          <line x1="0" y1="0" x2="12" y2="0" stroke="#b8a882" stroke-width="0.6" opacity="0.45"/>
-          <line x1="0" y1="0" x2="0" y2="12" stroke="#b8a882" stroke-width="0.6" opacity="0.45"/>
-        </pattern>
-        <!-- Lawn: fine horizontal grain -->
-        <pattern id="hatch-lawn" patternUnits="userSpaceOnUse" width="6" height="4">
-          <line x1="0" y1="2" x2="6" y2="2" stroke="#8aad5a" stroke-width="0.5" opacity="0.3"/>
-        </pattern>
-        <!-- Path: dot stipple -->
-        <pattern id="hatch-path" patternUnits="userSpaceOnUse" width="6" height="6">
-          <circle cx="3" cy="3" r="0.9" fill="#a89060" opacity="0.4"/>
         </pattern>
       </defs>
       <rect width="${W}" height="${H}" fill="#faf8f3"/>
@@ -1033,18 +1015,7 @@ MAINTENANCE NOTES
       const styleVal  = document.getElementById('style').value || 'contemporary'
       const features  = getFeatures()
 
-      // ── Step 1b: Canonical design spec ───────────────────
-      // A second Claude call producing a terse, fixed design spec (≤80 words).
-      // All three renders use this same spec verbatim — shared design DNA.
-      setStatus('Analysis complete. Building design specification...', 'loading')
-      const designSpec = await fetchDesignSpec(analysis, {
-        style:       styleVal,
-        features:    features,
-        maintenance: document.getElementById('maintenance').value || 'not specified',
-      })
-      console.log('Design spec:', designSpec)
-
-      setStatus('Design spec ready. Generating all three renders in parallel...', 'loading')
+      setStatus('Analysis complete. Generating render 1 of 3...', 'loading')
       sections.forEach(s => main.appendChild(buildSection(s.title, s.html)))
 
       // ── Step 2: Render grid setup ─────────────────────────
@@ -1187,22 +1158,40 @@ MAINTENANCE NOTES
       const basePhoto  = uploadedPhotos[0]
       const [morning, afternoon, evening] = timeOfDay
 
-      // ── Steps 3 & 4: All three renders in parallel from the original photo ──
-      //
-      // KEY ARCHITECTURE CHANGE from previous version:
-      //   - All three renders use the ORIGINAL padded photo as their base image.
-      //   - None are chained off a previous render's output.
-      //   - All three use the same canonical designSpec — only lighting varies.
-      //
-      // This eliminates accumulated hallucination (render 1 drift propagating
-      // to renders 2 and 3) and gives all three renders identical design DNA.
-      //
-      await Promise.all(timeOfDay.map(async (tod) => {
+      // ── Step 3: Render 1 (morning) with the original photo ──
+      // Uses the full transformation prompt — this establishes the design.
+      const morningPrompt = buildImagePrompt(sections, styleVal, features, morning)
+      console.log('Render 1 prompt:', morningPrompt)
+
+      let render1Url
+      try {
+        render1Url = await generateRender(morningPrompt, basePhoto.base64)
+        showSlotImage(document.getElementById(morning.id), render1Url, morning.label)
+      } catch (err) {
+        showSlotError(document.getElementById(morning.id), err.message)
+        // Fall through — renders 2 and 3 will fall back to the original photo
+      }
+
+      setStatus('Render 1 complete. Generating renders 2 and 3...', 'loading')
+
+      // Convert render 1 to base64 for chaining; fall back to original photo if it failed
+      let chainBase64 = basePhoto.base64
+      if (render1Url) {
+        try {
+          chainBase64 = await urlToBase64(render1Url)
+        } catch (err) {
+          console.warn('Could not convert render 1 for chaining, falling back to original photo:', err.message)
+        }
+      }
+
+      // ── Step 4: Renders 2 and 3 in parallel, chained off render 1 ──
+      // Uses a shorter re-lighting prompt since the design is already established.
+      await Promise.all([afternoon, evening].map(async (tod) => {
         const slot   = document.getElementById(tod.id)
-        const prompt = buildRenderPrompt(designSpec, styleVal, features, tod)
+        const prompt = buildRelightPrompt(styleVal, features, tod)
         console.log(`Render (${tod.label}) prompt:`, prompt)
         try {
-          const imgUrl = await generateRender(prompt, basePhoto.base64)
+          const imgUrl = await generateRender(prompt, chainBase64)
           showSlotImage(slot, imgUrl, tod.label)
         } catch (err) {
           showSlotError(slot, err.message)
@@ -1217,7 +1206,6 @@ MAINTENANCE NOTES
           orientation: orientationVal,
           style: styleVal,
           features,
-          designSpec,
         })
         const planSection = document.createElement('div')
         planSection.className = 'result-section'
